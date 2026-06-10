@@ -12,6 +12,27 @@ function App() {
   const [networkName, setNetworkName] = useState('');
   const [userRole, setUserRole] = useState('Public'); // Owner, Approver, Student, Public
   
+  // Demo Mode States (for testing when MetaMask is not installed)
+  const [isDemoMode, setIsDemoMode] = useState(false);
+  const [demoState, setDemoState] = useState({
+    owner: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+    approvers: { '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266': true },
+    students: [
+      {
+        id: 1,
+        name: 'Alice Smith',
+        course: 'Blockchain Engineering MSc',
+        email: 'alice@university.edu',
+        hasRequested: true,
+        isApproved: false,
+        lorIpfsHash: '',
+        requester: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+        approver: '0x0000000000000000000000000000000000000000'
+      }
+    ],
+    studentCount: 1
+  });
+
   // App UI states
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(false);
@@ -69,10 +90,34 @@ Sincerely,
     setTimeout(() => setNotification(null), 7000);
   };
 
-  // Connect wallet function
+  // Check if MetaMask is installed on load
+  useEffect(() => {
+    if (!window.ethereum) {
+      setIsDemoMode(true);
+      // Load demo state from localStorage if it exists
+      const savedState = localStorage.getItem('lor_demo_state');
+      if (savedState) {
+        try {
+          setDemoState(JSON.parse(savedState));
+        } catch (e) {
+          console.error("Failed to parse demo state", e);
+        }
+      }
+    }
+  }, []);
+
+  // Connect wallet function (handles MetaMask or connects Demo Wallet)
   const connectWallet = async () => {
     if (!window.ethereum) {
-      showNotification('error', 'MetaMask is not installed. Please install it to interact with this DApp.');
+      // MetaMask not available -> Connect Demo Account #0 (Owner)
+      setLoading(true);
+      setTimeout(() => {
+        setWalletAddress('0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'); // Hardhat Account #0
+        setNetworkName('Sandbox / Demo Network');
+        setUserRole('Owner');
+        showNotification('success', 'Connected to Sandbox Demo Mode as Administrator!');
+        setLoading(false);
+      }, 800);
       return;
     }
 
@@ -94,6 +139,7 @@ Sincerely,
       setSigner(tempSigner);
       setWalletAddress(accounts[0]);
       setNetworkName(netName);
+      setIsDemoMode(false);
 
       const tempContract = new ethers.Contract(
         contractDetails.address,
@@ -102,7 +148,7 @@ Sincerely,
       );
       setContract(tempContract);
 
-      showNotification('success', 'Wallet connected successfully!');
+      showNotification('success', 'Wallet connected successfully via MetaMask!');
     } catch (error) {
       console.error(error);
       showNotification('error', 'Failed to connect wallet: ' + error.message);
@@ -111,8 +157,52 @@ Sincerely,
     }
   };
 
-  // Fetch contract data
+  // Demo switch accounts (for sandbox testing without MetaMask)
+  const switchDemoAccount = (role) => {
+    if (!isDemoMode) return;
+    
+    let address = '';
+    if (role === 'Owner') {
+      address = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+      setUserRole('Owner');
+    } else if (role === 'Approver') {
+      address = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+      setUserRole('Approver');
+    } else if (role === 'Student') {
+      address = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC';
+      setUserRole('Student');
+    } else {
+      address = '0x90F79bf6EB2c4f870365E785982E1f101E93b906';
+      setUserRole('Public');
+    }
+    
+    setWalletAddress(address);
+    showNotification('info', `Switched demo account to ${role}: ${address}`);
+  };
+
+  // Fetch contract data (reads from blockchain or reads from demo state)
   const fetchData = useCallback(async () => {
+    if (isDemoMode) {
+      // Load data from sandbox state
+      setOwnerAddress(demoState.owner);
+      setStudentCount(demoState.studentCount);
+      setApproverStatus(!!demoState.approvers[walletAddress]);
+      
+      setStudentsList(demoState.students);
+      setPendingRequests(demoState.students.filter(s => s.hasRequested && !s.isApproved));
+      
+      // Determine Role based on demo address
+      if (walletAddress === demoState.owner) {
+        setUserRole('Owner');
+      } else if (demoState.approvers[walletAddress]) {
+        setUserRole('Approver');
+      } else {
+        const isStudent = demoState.students.some(s => s.requester.toLowerCase() === walletAddress.toLowerCase());
+        setUserRole(isStudent ? 'Student' : 'Public');
+      }
+      return;
+    }
+
     if (!contract) return;
     try {
       // Get Owner Address
@@ -161,7 +251,6 @@ Sincerely,
       } else if (isApprover) {
         setUserRole('Approver');
       } else {
-        // Check if current user has requested a recommendation
         const isStudent = fetchedStudents.some(s => s.requester.toLowerCase() === walletAddress.toLowerCase());
         setUserRole(isStudent ? 'Student' : 'Public');
       }
@@ -169,7 +258,7 @@ Sincerely,
     } catch (error) {
       console.error('Error fetching data:', error);
     }
-  }, [contract, walletAddress]);
+  }, [contract, walletAddress, isDemoMode, demoState]);
 
   // Handle chain/account changes
   useEffect(() => {
@@ -202,20 +291,56 @@ Sincerely,
 
   // Fetch data on connection
   useEffect(() => {
-    if (contract && walletAddress) {
+    if (walletAddress) {
       fetchData();
     }
   }, [contract, walletAddress, fetchData]);
 
+  // Save demoState to local storage helper
+  const updateDemoState = (newState) => {
+    setDemoState(newState);
+    localStorage.setItem('lor_demo_state', JSON.stringify(newState));
+  };
+
   // Add Student (Owner only)
   const handleAddStudent = async (e) => {
     e.preventDefault();
-    if (!contract) return;
     if (!newStudent.name || !newStudent.course || !newStudent.email) {
       showNotification('error', 'All student details must be filled.');
       return;
     }
 
+    if (isDemoMode) {
+      setTxLoading(true);
+      setTimeout(() => {
+        const nextId = demoState.studentCount + 1;
+        const student = {
+          id: nextId,
+          name: newStudent.name,
+          course: newStudent.course,
+          email: newStudent.email,
+          hasRequested: false,
+          isApproved: false,
+          lorIpfsHash: '',
+          requester: '0x0000000000000000000000000000000000000000',
+          approver: '0x0000000000000000000000000000000000000000'
+        };
+
+        const updatedState = {
+          ...demoState,
+          studentCount: nextId,
+          students: [...demoState.students, student]
+        };
+        updateDemoState(updatedState);
+        
+        showNotification('success', `Student "${newStudent.name}" registered successfully in Sandbox!`);
+        setNewStudent({ name: '', course: '', email: '' });
+        setTxLoading(false);
+      }, 1000);
+      return;
+    }
+
+    if (!contract) return;
     try {
       setTxLoading(true);
       const tx = await contract.addStudent(newStudent.name, newStudent.course, newStudent.email);
@@ -234,12 +359,36 @@ Sincerely,
 
   // Authorize Approver (Owner only)
   const handleAuthorizeApprover = async (authorize = true) => {
-    if (!contract || !approverToManage) return;
+    if (!approverToManage) return;
     if (!ethers.isAddress(approverToManage)) {
       showNotification('error', 'Please enter a valid Ethereum address.');
       return;
     }
 
+    if (isDemoMode) {
+      setTxLoading(true);
+      setTimeout(() => {
+        const updatedApprovers = { ...demoState.approvers };
+        if (authorize) {
+          updatedApprovers[approverToManage] = true;
+        } else {
+          delete updatedApprovers[approverToManage];
+        }
+
+        const updatedState = {
+          ...demoState,
+          approvers: updatedApprovers
+        };
+        updateDemoState(updatedState);
+
+        showNotification('success', `Approver successfully ${authorize ? 'authorized' : 'deauthorized'} in Sandbox!`);
+        setApproverToManage('');
+        setTxLoading(false);
+      }, 1000);
+      return;
+    }
+
+    if (!contract) return;
     try {
       setTxLoading(true);
       const tx = authorize 
@@ -262,13 +411,44 @@ Sincerely,
   // Request Recommendation (Student)
   const handleRequestRecommendation = async (e) => {
     e.preventDefault();
-    if (!contract || !studentIdToRequest) return;
+    if (!studentIdToRequest) return;
     const id = parseInt(studentIdToRequest);
     if (isNaN(id) || id <= 0) {
       showNotification('error', 'Please enter a valid Student ID.');
       return;
     }
 
+    if (isDemoMode) {
+      setTxLoading(true);
+      setTimeout(() => {
+        const studentIndex = demoState.students.findIndex(s => s.id === id);
+        if (studentIndex === -1) {
+          showNotification('error', 'Student ID does not exist in sandbox.');
+          setTxLoading(false);
+          return;
+        }
+
+        const updatedStudents = [...demoState.students];
+        updatedStudents[studentIndex] = {
+          ...updatedStudents[studentIndex],
+          hasRequested: true,
+          requester: walletAddress
+        };
+
+        const updatedState = {
+          ...demoState,
+          students: updatedStudents
+        };
+        updateDemoState(updatedState);
+
+        showNotification('success', 'Recommendation request successfully submitted to Sandbox!');
+        setStudentIdToRequest('');
+        setTxLoading(false);
+      }, 1000);
+      return;
+    }
+
+    if (!contract) return;
     try {
       setTxLoading(true);
       const tx = await contract.requestRecommendation(id);
@@ -303,7 +483,6 @@ Sincerely,
   // Approve Recommendation (Faculty / Approver)
   const handleApproveRecommendation = async (e) => {
     e.preventDefault();
-    if (!contract) return;
     const id = parseInt(lorApproval.studentId);
     if (isNaN(id) || id <= 0) {
       showNotification('error', 'Please enter a valid Student ID.');
@@ -314,6 +493,48 @@ Sincerely,
       return;
     }
 
+    if (isDemoMode) {
+      setTxLoading(true);
+      setTimeout(async () => {
+        const studentIndex = demoState.students.findIndex(s => s.id === id);
+        if (studentIndex === -1) {
+          showNotification('error', 'Student not found in sandbox.');
+          setTxLoading(false);
+          return;
+        }
+
+        const student = demoState.students[studentIndex];
+        showNotification('info', 'Uploading Letter text to IPFS simulation...');
+        
+        const ipfsResult = await uploadToIPFS(lorApproval.letterText, {
+          studentId: id,
+          studentName: student.name,
+          course: student.course,
+          approverAddress: walletAddress
+        });
+
+        const updatedStudents = [...demoState.students];
+        updatedStudents[studentIndex] = {
+          ...updatedStudents[studentIndex],
+          isApproved: true,
+          lorIpfsHash: ipfsResult.ipfsHash,
+          approver: walletAddress
+        };
+
+        const updatedState = {
+          ...demoState,
+          students: updatedStudents
+        };
+        updateDemoState(updatedState);
+
+        showNotification('success', `Simulated LoR approved and signed to local sandbox DB!`);
+        setLorApproval({ studentId: '', letterText: '' });
+        setTxLoading(false);
+      }, 1500);
+      return;
+    }
+
+    if (!contract) return;
     try {
       setTxLoading(true);
       const student = studentsList.find(s => s.id === id);
@@ -354,13 +575,41 @@ Sincerely,
   // Search Student & fetch IPFS LoR
   const handleSearchStudent = async (e) => {
     e.preventDefault();
-    if (!contract || !searchId) return;
     const id = parseInt(searchId);
     if (isNaN(id) || id <= 0) {
       showNotification('error', 'Please enter a valid Student ID.');
       return;
     }
 
+    if (isDemoMode) {
+      setLoading(true);
+      setSearchedStudent(null);
+      setSearchedLor(null);
+      
+      setTimeout(async () => {
+        const student = demoState.students.find(s => s.id === id);
+        if (!student) {
+          showNotification('error', 'Student does not exist in Sandbox.');
+          setLoading(false);
+          return;
+        }
+
+        setSearchedStudent(student);
+
+        if (student.isApproved && student.lorIpfsHash) {
+          setFetchingLor(true);
+          const ipfsData = await fetchFromIPFS(student.lorIpfsHash);
+          if (ipfsData) {
+            setSearchedLor(ipfsData);
+          }
+          setFetchingLor(false);
+        }
+        setLoading(false);
+      }, 600);
+      return;
+    }
+
+    if (!contract) return;
     try {
       setLoading(true);
       setSearchedStudent(null);
@@ -409,7 +658,7 @@ Sincerely,
           {walletAddress ? (
             <>
               <div className="network-badge">
-                <span className="network-dot"></span>
+                <span className="network-dot" style={{ backgroundColor: isDemoMode ? '#a78bfa' : 'hsl(var(--success))', boxShadow: isDemoMode ? '0 0 8px #a78bfa' : '0 0 8px hsl(var(--success))' }}></span>
                 <span>{networkName}</span>
               </div>
               <button className="btn btn-secondary" style={{ fontSize: '0.85rem' }} disabled>
@@ -418,17 +667,43 @@ Sincerely,
             </>
           ) : (
             <button className="btn btn-primary" onClick={connectWallet} disabled={loading}>
-              {loading ? 'Connecting...' : 'Connect MetaMask'}
+              {loading ? 'Connecting...' : window.ethereum ? 'Connect MetaMask' : 'Connect Demo Sandbox'}
             </button>
           )}
         </div>
       </header>
 
+      {/* Demo Mode switcher panel */}
+      {isDemoMode && walletAddress && (
+        <div className="glass-panel" style={{ padding: '12px 24px', borderLeft: '4px solid #a78bfa', display: 'flex', flexWrap: 'wrap', gap: '16px', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <span style={{ fontSize: '0.85rem', color: '#a78bfa', fontWeight: 'bold' }}>🛠️ SANDBOX DEMO RUNNING (No MetaMask Detected)</span>
+            <p style={{ fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginTop: '2px' }}>
+              Simulate different user viewpoints to test all DApp functions without MetaMask.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className={`btn btn-secondary ${userRole === 'Owner' ? 'btn-outline' : ''}`} style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => switchDemoAccount('Owner')}>
+              Owner Account
+            </button>
+            <button className={`btn btn-secondary ${userRole === 'Approver' ? 'btn-outline' : ''}`} style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => switchDemoAccount('Approver')}>
+              Faculty Account
+            </button>
+            <button className={`btn btn-secondary ${userRole === 'Student' ? 'btn-outline' : ''}`} style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => switchDemoAccount('Student')}>
+              Student Account
+            </button>
+            <button className={`btn btn-secondary ${userRole === 'Public' ? 'btn-outline' : ''}`} style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => switchDemoAccount('Public')}>
+              Public Viewer
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Role Banner / Status info */}
       {walletAddress && (
         <div className="role-banner glass-panel">
           <div>
-            <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-secondary))' }}>Connected Role</span>
+            <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-secondary))' }}>Connected Address</span>
             <h4 style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
               {walletAddress}
             </h4>
@@ -455,8 +730,13 @@ Sincerely,
             A secure, tamper-proof system for university administrators, academic faculty, and students to manage, request, approve, and verify official Letters of Recommendation on-chain.
           </p>
           <button className="btn btn-primary" style={{ padding: '14px 28px', fontSize: '1rem' }} onClick={connectWallet}>
-            🚀 Get Started via MetaMask
+            🚀 Connect DApp Environment
           </button>
+          {!window.ethereum && (
+            <p style={{ fontSize: '0.85rem', color: '#a78bfa', marginTop: '16px' }}>
+              ⚠️ MetaMask extension not detected in this browser. Connecting will open <strong>Sandbox Mode</strong>.
+            </p>
+          )}
         </div>
       ) : (
         <>
@@ -614,7 +894,7 @@ Sincerely,
                   onChange={(e) => setSearchId(e.target.value)}
                 />
                 <button type="submit" className="btn btn-primary" disabled={loading}>
-                  {loading ? 'Searching...' : '🔍 Search Blockchain'}
+                  {loading ? 'Searching...' : '🔍 Search Database'}
                 </button>
               </form>
 
@@ -688,7 +968,7 @@ Sincerely,
                             <div className="lor-letter-header">
                               <h2>UNIVERSITY RECOMMENDATION LETTER</h2>
                               <p style={{ fontSize: '0.85rem', color: '#64748b', marginTop: '4px' }}>
-                                Verified On-Chain Credential | Student ID: #{searchedStudent.id}
+                                Verified Credential Profile | Student ID: #{searchedStudent.id}
                               </p>
                             </div>
                             <div className="lor-letter-body">
@@ -700,8 +980,8 @@ Sincerely,
                                 {searchedStudent.approver}
                               </div>
                               <div style={{ textAlign: 'right' }}>
-                                <strong>Smart Contract:</strong><br />
-                                {contractDetails.address}
+                                <strong>Record Reference:</strong><br />
+                                {isDemoMode ? 'Simulated Sandbox Registry' : contractDetails.address}
                               </div>
                             </div>
                           </div>
@@ -755,7 +1035,7 @@ Sincerely,
                   {txLoading ? (
                     <>
                       <div className="spinner" style={{ marginRight: '8px' }}></div>
-                      Confirming on Blockchain...
+                      Confirming on Registry...
                     </>
                   ) : 'Submit Request'}
                 </button>
@@ -814,7 +1094,7 @@ Sincerely,
                 <h3 className="card-title">Faculty Recommendation Panel</h3>
               </div>
               <p style={{ color: 'hsl(var(--text-secondary))', marginBottom: '24px', fontSize: '0.95rem' }}>
-                Review and approve outstanding recommendation requests from students. Select a request to generate a beautiful, personalized recommendation using academic or professional templates, and publish it securely to IPFS and the Ethereum blockchain.
+                Review and approve outstanding recommendation requests from students. Select a request to generate a beautiful, personalized recommendation using academic or professional templates, and publish it securely to IPFS and the registry.
               </p>
 
               <div className="dashboard-grid">
@@ -922,7 +1202,7 @@ Sincerely,
                           <div className="spinner" style={{ marginRight: '8px' }}></div>
                           Uploading & Signing...
                         </>
-                      ) : '✍️ Approve & Sign to Blockchain'}
+                      ) : '✍️ Approve & Sign to Registry'}
                     </button>
                   </form>
                 </div>
